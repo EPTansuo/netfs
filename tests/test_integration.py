@@ -1,4 +1,7 @@
+import errno
 import os
+
+import pytest
 
 from netfs.rpc_client import RpcClient
 
@@ -60,6 +63,58 @@ def test_exec_session(agent):
             client.exec_close(session_id)
         except Exception:
             pass
+        client.close()
+
+
+def test_write_and_directory_ops(agent):
+    client = RpcClient("127.0.0.1", agent["port"])
+    handle = None
+    try:
+        client.mkdir("/work", 0o755)
+        client.fsyncdir("/work")
+        handle = client.create("/work/output.txt", flags=os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode=0o644)
+        assert client.write(handle, 0, b"hello") == 5
+        assert client.write(handle, 5, b" world") == 6
+        client.fsync(handle, datasync=False)
+        client.truncate(5, handle=handle)
+        client.fsync(handle, datasync=False)
+        with pytest.raises(OSError) as busy:
+            client.open("/work/output.txt", os.O_WRONLY)
+        assert busy.value.errno == errno.EBUSY
+        client.close_handle(handle)
+        handle = None
+
+        read_handle = client.open("/work/output.txt", os.O_RDONLY)
+        try:
+            payload, eof = client.read(read_handle, 0, 1024)
+            assert payload == b"hello"
+            assert eof is False
+        finally:
+            client.close_handle(read_handle)
+
+        client.rename("/work/output.txt", "/work/final.txt")
+        entries = [item["name"] for item in client.readdir("/work")]
+        assert entries == ["final.txt"]
+        client.unlink("/work/final.txt")
+        client.rmdir("/work")
+        root_entries = [item["name"] for item in client.readdir("/")]
+        assert root_entries == ["hello.link", "hello.txt", "subdir"]
+    finally:
+        if handle is not None:
+            try:
+                client.close_handle(handle)
+            except Exception:
+                pass
+        client.close()
+
+
+def test_append_is_rejected(agent):
+    client = RpcClient("127.0.0.1", agent["port"])
+    try:
+        with pytest.raises(OSError) as exc_info:
+            client.open("/hello.txt", os.O_WRONLY | os.O_APPEND)
+        assert exc_info.value.errno == errno.EOPNOTSUPP
+    finally:
         client.close()
 
 

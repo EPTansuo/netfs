@@ -7,13 +7,9 @@ import stat
 import threading
 
 
-WRITE_FLAG_MASK = (
-    os.O_WRONLY
-    | os.O_RDWR
-    | getattr(os, "O_APPEND", 0)
-    | getattr(os, "O_CREAT", 0)
-    | getattr(os, "O_TRUNC", 0)
-)
+WRITE_ACCESS_MASK = os.O_WRONLY | os.O_RDWR
+UNSUPPORTED_WRITE_FLAGS = getattr(os, "O_APPEND", 0)
+DIRECTORY_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
 
 
 def normalize_remote_path(path):
@@ -48,6 +44,15 @@ def _stat_ns(st, attr_ns, attr_s):
     return int(getattr(st, attr_s) * 1000000000)
 
 
+def _is_writable_flags(flags):
+    return bool(flags & WRITE_ACCESS_MASK)
+
+
+def _ensure_supported_flags(flags):
+    if flags & UNSUPPORTED_WRITE_FLAGS:
+        raise OSError(errno.EOPNOTSUPP, "O_APPEND is not supported")
+
+
 class ExportedRoot(object):
     def __init__(self, root_path):
         self.root_path = os.path.realpath(root_path)
@@ -64,52 +69,130 @@ class ExportedRoot(object):
             raise OSError(errno.EPERM, "path escapes exported root")
         return target
 
+    def parent_remote_path(self, remote_path):
+        remote_path = normalize_remote_path(remote_path)
+        return normalize_remote_path(posixpath.dirname(remote_path))
+
 
 class FileHandleTable(object):
     def __init__(self):
         self._next_handle = 1
         self._handles = {}
+        self._writers = {}
         self._lock = threading.Lock()
 
-    def open(self, path, flags):
-        if flags & WRITE_FLAG_MASK:
-            raise OSError(errno.EROFS, "filesystem is read-only")
-        fd = os.open(path, flags)
+    def _reserve_writer(self, inode_key, owner):
         with self._lock:
-            handle = self._next_handle
-            self._next_handle += 1
-            self._handles[handle] = fd
-            return handle
+            current = self._writers.get(inode_key)
+            if current is not None and current != owner:
+                raise OSError(errno.EBUSY, "another writer already holds this file")
+            self._writers[inode_key] = owner
+
+    def _release_writer(self, inode_key, owner):
+        with self._lock:
+            current = self._writers.get(inode_key)
+            if current == owner:
+                del self._writers[inode_key]
+
+    def _register_handle(self, fd, path, writable):
+        st = os.fstat(fd)
+        inode_key = (st.st_dev, st.st_ino)
+        handle = None
+        try:
+            with self._lock:
+                if writable:
+                    current = self._writers.get(inode_key)
+                    if current is not None:
+                        raise OSError(errno.EBUSY, "another writer already holds this file")
+                handle = self._next_handle
+                self._next_handle += 1
+                entry = {
+                    "fd": fd,
+                    "path": path,
+                    "writable": writable,
+                    "inode_key": inode_key,
+                }
+                self._handles[handle] = entry
+                if writable:
+                    self._writers[inode_key] = handle
+                return handle
+        except Exception:
+            os.close(fd)
+            raise
+
+    def open(self, path, flags, mode=0o666):
+        _ensure_supported_flags(flags)
+        fd = os.open(path, flags, mode)
+        return self._register_handle(fd, path, _is_writable_flags(flags))
+
+    def create(self, path, flags, mode):
+        flags = flags | os.O_CREAT
+        return self.open(path, flags, mode=mode)
 
     def get(self, handle):
         with self._lock:
-            fd = self._handles.get(handle)
-        if fd is None:
+            entry = self._handles.get(handle)
+        if entry is None:
             raise OSError(errno.EBADF, "invalid file handle")
-        return fd
+        return entry
 
     def close(self, handle):
         with self._lock:
-            fd = self._handles.pop(handle, None)
-        if fd is None:
+            entry = self._handles.pop(handle, None)
+        if entry is None:
             raise OSError(errno.EBADF, "invalid file handle")
-        os.close(fd)
+        try:
+            os.close(entry["fd"])
+        finally:
+            if entry["writable"]:
+                self._release_writer(entry["inode_key"], handle)
 
     def close_all(self):
         with self._lock:
             handles = list(self._handles.items())
             self._handles.clear()
-        for _, fd in handles:
+            self._writers.clear()
+        for _, entry in handles:
             try:
-                os.close(fd)
+                os.close(entry["fd"])
             except OSError:
                 pass
+
+    def temporary_writer(self, path):
+        _ensure_supported_flags(os.O_WRONLY)
+        fd = os.open(path, os.O_WRONLY)
+        st = os.fstat(fd)
+        inode_key = (st.st_dev, st.st_ino)
+        owner = ("temp", fd)
+        try:
+            self._reserve_writer(inode_key, owner)
+        except Exception:
+            os.close(fd)
+            raise
+        return fd, inode_key, owner
 
 
 class FilesystemService(object):
     def __init__(self, exported_root):
         self.exported_root = ExportedRoot(exported_root)
         self.handles = FileHandleTable()
+
+    def _fsync_directory_remote(self, remote_path):
+        directory = self.exported_root.resolve(remote_path)
+        fd = os.open(directory, DIRECTORY_OPEN_FLAGS)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def _fsync_parents(self, *remote_paths):
+        parents = []
+        for remote_path in remote_paths:
+            parent = self.exported_root.parent_remote_path(remote_path)
+            if parent not in parents:
+                parents.append(parent)
+        for parent in parents:
+            self._fsync_directory_remote(parent)
 
     def stat(self, path):
         target = self.exported_root.resolve(path)
@@ -144,13 +227,92 @@ class FilesystemService(object):
         target = self.exported_root.resolve(path)
         return {"handle": self.handles.open(target, flags)}
 
+    def create(self, path, flags, mode):
+        target = self.exported_root.resolve(path, follow_symlinks=False)
+        handle = self.handles.create(target, flags, mode)
+        self._fsync_parents(path)
+        return {"handle": handle}
+
     def read(self, handle, offset, size):
-        fd = self.handles.get(handle)
-        return os.pread(fd, size, offset)
+        entry = self.handles.get(handle)
+        return os.pread(entry["fd"], size, offset)
+
+    def write(self, handle, offset, data):
+        entry = self.handles.get(handle)
+        if not entry["writable"]:
+            raise OSError(errno.EBADF, "file handle is not writable")
+        total = 0
+        while total < len(data):
+            written = os.pwrite(entry["fd"], data[total:], offset + total)
+            if written <= 0:
+                raise OSError(errno.EIO, "short write to remote file")
+            total += written
+        return {"written": total}
+
+    def truncate(self, handle, size):
+        entry = self.handles.get(handle)
+        if not entry["writable"]:
+            raise OSError(errno.EBADF, "file handle is not writable")
+        os.ftruncate(entry["fd"], size)
+        return {"truncated": True}
+
+    def truncate_path(self, path, size):
+        target = self.exported_root.resolve(path)
+        fd, inode_key, owner = self.handles.temporary_writer(target)
+        try:
+            os.ftruncate(fd, size)
+            os.fsync(fd)
+        finally:
+            try:
+                os.close(fd)
+            finally:
+                self.handles._release_writer(inode_key, owner)
+        return {"truncated": True}
+
+    def flush(self, handle):
+        self.handles.get(handle)
+        return {"flushed": True}
+
+    def fsync(self, handle, datasync=False):
+        entry = self.handles.get(handle)
+        if datasync and hasattr(os, "fdatasync"):
+            os.fdatasync(entry["fd"])
+        else:
+            os.fsync(entry["fd"])
+        return {"synced": True}
 
     def close(self, handle):
         self.handles.close(handle)
         return {"closed": True}
+
+    def mkdir(self, path, mode):
+        target = self.exported_root.resolve(path, follow_symlinks=False)
+        os.mkdir(target, mode)
+        self._fsync_parents(path)
+        return {"created": True}
+
+    def rename(self, old_path, new_path):
+        old_target = self.exported_root.resolve(old_path, follow_symlinks=False)
+        new_target = self.exported_root.resolve(new_path, follow_symlinks=False)
+        os.rename(old_target, new_target)
+        self._fsync_parents(old_path, new_path)
+        return {"renamed": True}
+
+    def unlink(self, path):
+        target = self.exported_root.resolve(path, follow_symlinks=False)
+        os.unlink(target)
+        self._fsync_parents(path)
+        return {"removed": True}
+
+    def rmdir(self, path):
+        target = self.exported_root.resolve(path, follow_symlinks=False)
+        os.rmdir(target)
+        self._fsync_parents(path)
+        return {"removed": True}
+
+    def fsyncdir(self, path):
+        self._fsync_directory_remote(path)
+        return {"synced": True}
 
     def statfs(self, path):
         target = self.exported_root.resolve(path)

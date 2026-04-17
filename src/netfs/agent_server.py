@@ -88,6 +88,12 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             return self.fs_service.readdir(params["path"]), None
         if op == "open":
             return self.fs_service.open(params["path"], int(params.get("flags", 0))), None
+        if op == "create":
+            return self.fs_service.create(
+                params["path"],
+                int(params.get("flags", 0)),
+                int(params.get("mode", 0o666)),
+            ), None
         if op == "read":
             data = self.fs_service.read(
                 int(params["handle"]),
@@ -95,8 +101,35 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 int(params.get("size", 65536)),
             )
             return {"size": len(data), "eof": len(data) == 0}, data
+        if op == "write":
+            return self.fs_service.write(
+                int(params["handle"]),
+                int(params.get("offset", 0)),
+                payload,
+            ), None
+        if op == "truncate":
+            if "handle" in params and params["handle"] is not None:
+                return self.fs_service.truncate(int(params["handle"]), int(params["size"])), None
+            return self.fs_service.truncate_path(params["path"], int(params["size"])), None
+        if op == "flush":
+            return self.fs_service.flush(int(params["handle"])), None
+        if op == "fsync":
+            return self.fs_service.fsync(
+                int(params["handle"]),
+                datasync=bool(params.get("datasync", False)),
+            ), None
         if op == "close":
             return self.fs_service.close(int(params["handle"])), None
+        if op == "mkdir":
+            return self.fs_service.mkdir(params["path"], int(params.get("mode", 0o777))), None
+        if op == "rename":
+            return self.fs_service.rename(params["old_path"], params["new_path"]), None
+        if op == "unlink":
+            return self.fs_service.unlink(params["path"]), None
+        if op == "rmdir":
+            return self.fs_service.rmdir(params["path"]), None
+        if op == "fsyncdir":
+            return self.fs_service.fsyncdir(params["path"]), None
         if op == "statfs":
             return self.fs_service.statfs(params["path"]), None
         if op == "exec_start":

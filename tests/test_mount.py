@@ -23,7 +23,7 @@ def _wait_for_mount(mountpoint, expected):
     raise RuntimeError("mount did not become ready")
 
 
-def test_mount_read_only(agent, tmp_path):
+def test_mount_read_write(agent, tmp_path):
     mountpoint = tmp_path / "mnt"
     mountpoint.mkdir()
     proc = subprocess.Popen(
@@ -45,8 +45,22 @@ def test_mount_read_only(agent, tmp_path):
         _wait_for_mount(str(mountpoint), ["hello.link", "hello.txt", "subdir"])
         with open(str(mountpoint / "hello.txt"), "rb") as infile:
             assert infile.read() == b"hello from netfs\n"
-        with pytest.raises(OSError):
-            open(str(mountpoint / "new.txt"), "wb")
+        workdir = mountpoint / "work"
+        workdir.mkdir()
+        with open(str(workdir / "new.txt"), "wb", buffering=0) as outfile:
+            outfile.write(b"netfs-write")
+            os.fsync(outfile.fileno())
+        with open(str(workdir / "new.txt"), "rb") as infile:
+            assert infile.read() == b"netfs-write"
+        with open(str(workdir / "new.txt"), "r+b", buffering=0) as outfile:
+            outfile.truncate(5)
+            os.fsync(outfile.fileno())
+        with open(str(workdir / "new.txt"), "rb") as infile:
+            assert infile.read() == b"netfs"
+        os.rename(str(workdir / "new.txt"), str(workdir / "renamed.txt"))
+        assert sorted(os.listdir(str(workdir))) == ["renamed.txt"]
+        os.unlink(str(workdir / "renamed.txt"))
+        os.rmdir(str(workdir))
     finally:
         subprocess.check_call(["fusermount3", "-u", str(mountpoint)])
         proc.terminate()

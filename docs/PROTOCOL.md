@@ -45,7 +45,7 @@ JSON 头里的 `payload_len` 描述后续原始字节长度。
 
 ## 已实现操作
 
-### 文件
+### 文件和目录
 
 - `ping`
 - `stat`
@@ -54,9 +54,28 @@ JSON 头里的 `payload_len` 描述后续原始字节长度。
 - `readlink`
 - `readdir`
 - `open`
+- `create`
 - `read`
+- `write`
+- `truncate`
+- `flush`
+- `fsync`
 - `close`
+- `mkdir`
+- `rename`
+- `unlink`
+- `rmdir`
+- `fsyncdir`
 - `statfs`
+
+## 写语义
+
+- 每个 `open/create` 在 `device` 上都对应一个真实 fd
+- `write` 直接映射为远端 `pwrite`
+- 不支持 `O_APPEND`
+- 单文件同一时刻只允许一个 writer；第二个 writer 返回 `EBUSY`
+- `flush` 不是提交点，真正的提交点是 `fsync`
+- 如果链路在写操作期间断开，挂载侧会把相关 handle 标成 uncertain，后续对该 handle 返回 `EIO`
 
 ### exec
 

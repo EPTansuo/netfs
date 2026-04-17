@@ -94,9 +94,20 @@ class RpcClient(object):
             "op": op,
             "params": params or {},
         }
-        with self._write_lock:
-            write_frame(self.writer, header, payload=payload)
-        item = response_queue.get(timeout=timeout)
+        try:
+            with self._write_lock:
+                write_frame(self.writer, header, payload=payload)
+        except Exception:
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+            self._reset_connection()
+            raise
+        try:
+            item = response_queue.get(timeout=timeout)
+        except queue.Empty:
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+            raise TimeoutError("rpc request timed out")
         if isinstance(item, Exception):
             raise item
         response, response_payload = item
@@ -134,6 +145,10 @@ class RpcClient(object):
         result, _ = self.request("open", {"path": path, "flags": flags})
         return result["handle"]
 
+    def create(self, path, flags=0, mode=0o666):
+        result, _ = self.request("create", {"path": path, "flags": flags, "mode": mode})
+        return result["handle"]
+
     def read(self, handle, offset, size):
         result, payload = self.request(
             "read",
@@ -141,8 +156,45 @@ class RpcClient(object):
         )
         return payload, result["eof"]
 
+    def write(self, handle, offset, data):
+        result, _ = self.request(
+            "write",
+            {"handle": handle, "offset": offset},
+            payload=data,
+        )
+        return result["written"]
+
+    def truncate(self, size, handle=None, path=None):
+        params = {"size": size}
+        if handle is not None:
+            params["handle"] = handle
+        if path is not None:
+            params["path"] = path
+        self.request("truncate", params)
+
+    def flush(self, handle):
+        self.request("flush", {"handle": handle})
+
+    def fsync(self, handle, datasync=False):
+        self.request("fsync", {"handle": handle, "datasync": datasync})
+
     def close_handle(self, handle):
         self.request("close", {"handle": handle})
+
+    def mkdir(self, path, mode=0o777):
+        self.request("mkdir", {"path": path, "mode": mode})
+
+    def rename(self, old_path, new_path):
+        self.request("rename", {"old_path": old_path, "new_path": new_path})
+
+    def unlink(self, path):
+        self.request("unlink", {"path": path})
+
+    def rmdir(self, path):
+        self.request("rmdir", {"path": path})
+
+    def fsyncdir(self, path):
+        self.request("fsyncdir", {"path": path})
 
     def statfs(self, path):
         result, _ = self.request("statfs", {"path": path})
