@@ -4,6 +4,7 @@ import errno
 import os
 import posixpath
 import threading
+import time
 
 from netfs.fs import UNSUPPORTED_WRITE_FLAGS, normalize_remote_path
 from netfs.rpc_client import RpcClient
@@ -89,14 +90,62 @@ class LocalHandleTable(object):
             return self._handles.pop(handle, None)
 
 
+class MetadataCache(object):
+    def __init__(self, ttl_seconds=2.0):
+        self.ttl_seconds = ttl_seconds
+        self._entries = {}
+        self._lock = threading.Lock()
+
+    def store(self, path, stat_result):
+        expires_at = time.monotonic() + self.ttl_seconds
+        with self._lock:
+            self._entries[path] = (expires_at, dict(stat_result))
+
+    def get(self, path):
+        now = time.monotonic()
+        with self._lock:
+            item = self._entries.get(path)
+            if item is None:
+                return None
+            expires_at, stat_result = item
+            if expires_at < now:
+                del self._entries[path]
+                return None
+            return dict(stat_result)
+
+    def invalidate(self, path):
+        with self._lock:
+            self._entries.pop(path, None)
+
+    def invalidate_many(self, paths):
+        with self._lock:
+            for path in paths:
+                self._entries.pop(path, None)
+
+
 class NetfsFuseOperations(Operations):
     def __init__(self, client, remote_root="/"):
         self.client = client
         self.remote_root = normalize_remote_path(remote_root)
         self.handles = LocalHandleTable()
+        self.metadata_cache = MetadataCache(ttl_seconds=2.0)
 
     def _remote(self, path):
         return _join_remote(self.remote_root, path)
+
+    def _parent_paths(self, path):
+        parent = posixpath.dirname(normalize_remote_path(path))
+        return [normalize_remote_path(path), normalize_remote_path(parent)]
+
+    def _invalidate_paths(self, *paths):
+        targets = []
+        for path in paths:
+            if path is None:
+                continue
+            for item in self._parent_paths(path):
+                if item not in targets:
+                    targets.append(item)
+        self.metadata_cache.invalidate_many(targets)
 
     def _translate_error(self, exc, fh=None):
         if fh is not None and _is_transport_error(exc):
@@ -126,8 +175,14 @@ class NetfsFuseOperations(Operations):
             self._translate_error(exc)
 
     def getattr(self, path, fh=None):
+        remote_path = self._remote(path)
+        cached = self.metadata_cache.get(remote_path)
+        if cached is not None:
+            return cached
         try:
-            return self.client.stat(self._remote(path), follow_symlinks=False)
+            result = self.client.lstat(remote_path)
+            self.metadata_cache.store(remote_path, result)
+            return result
         except Exception as exc:
             self._translate_error(exc, fh=fh)
 
@@ -140,8 +195,12 @@ class NetfsFuseOperations(Operations):
     def readdir(self, path, fh):
         yield "."
         yield ".."
+        remote_path = self._remote(path)
         try:
-            for entry in self.client.readdir(self._remote(path)):
+            for entry in self.client.readdir(remote_path):
+                entry_path = _join_remote(remote_path, entry["name"])
+                if "stat" in entry:
+                    self.metadata_cache.store(entry_path, entry["stat"])
                 yield entry["name"]
         except Exception as exc:
             self._translate_error(exc)
@@ -163,6 +222,7 @@ class NetfsFuseOperations(Operations):
             raise FuseOSError(errno.EOPNOTSUPP)
         try:
             remote_handle = self.client.create(self._remote(path), flags=flags, mode=mode)
+            self._invalidate_paths(path)
             return self.handles.register(remote_handle, writable=True)
         except Exception as exc:
             self._translate_error(exc)
@@ -181,6 +241,7 @@ class NetfsFuseOperations(Operations):
             written = self.client.write(entry["remote_handle"], offset, data)
             if written != len(data):
                 raise FuseOSError(errno.EIO)
+            self.metadata_cache.invalidate(self._remote(path))
             return written
         except Exception as exc:
             self._translate_error(exc, fh=fh)
@@ -192,6 +253,7 @@ class NetfsFuseOperations(Operations):
                 self.client.truncate(length, handle=entry["remote_handle"])
             else:
                 self.client.truncate(length, path=self._remote(path))
+            self.metadata_cache.invalidate(self._remote(path))
             return 0
         except Exception as exc:
             self._translate_error(exc, fh=fh)
@@ -231,6 +293,7 @@ class NetfsFuseOperations(Operations):
     def mkdir(self, path, mode):
         try:
             self.client.mkdir(self._remote(path), mode)
+            self._invalidate_paths(path)
             return 0
         except Exception as exc:
             self._translate_error(exc)
@@ -238,6 +301,7 @@ class NetfsFuseOperations(Operations):
     def rename(self, old, new):
         try:
             self.client.rename(self._remote(old), self._remote(new))
+            self._invalidate_paths(old, new)
             return 0
         except Exception as exc:
             self._translate_error(exc)
@@ -245,6 +309,7 @@ class NetfsFuseOperations(Operations):
     def unlink(self, path):
         try:
             self.client.unlink(self._remote(path))
+            self._invalidate_paths(path)
             return 0
         except Exception as exc:
             self._translate_error(exc)
@@ -252,6 +317,7 @@ class NetfsFuseOperations(Operations):
     def rmdir(self, path):
         try:
             self.client.rmdir(self._remote(path))
+            self._invalidate_paths(path)
             return 0
         except Exception as exc:
             self._translate_error(exc)
@@ -286,7 +352,7 @@ def mount_foreground(host, port, mountpoint, remote_root="/", allow_other=False)
         direct_io=True,
         kernel_cache=False,
         auto_cache=False,
-        entry_timeout=0.2,
-        attr_timeout=0.2,
+        entry_timeout=2.0,
+        attr_timeout=2.0,
         negative_timeout=0.0,
     )

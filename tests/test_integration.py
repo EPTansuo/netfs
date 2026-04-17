@@ -1,5 +1,6 @@
 import errno
 import os
+import time
 
 import pytest
 
@@ -133,3 +134,27 @@ def test_reconnect_after_agent_restart(agent):
         assert client.ping()["pong"] is True
     finally:
         client.close()
+
+
+def test_exec_close_does_not_block(agent):
+    client = RpcClient("127.0.0.1", agent["port"])
+    session_id = None
+    try:
+        session_id = client.exec_start(["/bin/sh", "-lc", "printf done"])
+        data, stdout_eof = client.exec_read_stdout(session_id, wait=True, timeout=0.2)
+        assert data == b"done"
+        if not stdout_eof:
+            _, stdout_eof = client.exec_read_stdout(session_id, wait=True, timeout=0.2)
+        assert stdout_eof is True
+        wait_result = client.exec_wait(session_id)
+        assert wait_result["returncode"] == 0
+    finally:
+        if session_id is not None:
+            try:
+                client.exec_close(session_id)
+            except Exception:
+                pass
+        started = time.monotonic()
+        client.close()
+        elapsed = time.monotonic() - started
+        assert elapsed < 1.0

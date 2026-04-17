@@ -30,6 +30,8 @@ class RpcClient(object):
             if self.sock is not None:
                 return
             self.sock = socket.create_connection((self.host, self.port), timeout=self.connect_timeout)
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.sock.settimeout(None)
             self.reader = self.sock.makefile("rb")
             self.writer = self.sock.makefile("wb")
             self._reader_thread = threading.Thread(target=self._reader_loop, name="netfs-rpc-reader")
@@ -54,6 +56,11 @@ class RpcClient(object):
             self.reader = None
             self.sock = None
             self._reader_thread = None
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         try:
             if writer is not None:
                 writer.close()
@@ -127,6 +134,10 @@ class RpcClient(object):
     def stat(self, path, follow_symlinks=True):
         op = "stat" if follow_symlinks else "lstat"
         result, _ = self.request(op, {"path": path})
+        return result
+
+    def lstat(self, path):
+        result, _ = self.request("lstat", {"path": path})
         return result
 
     def access(self, path, mode):

@@ -2,6 +2,7 @@ from __future__ import print_function
 
 import argparse
 import errno
+import socket
 import socketserver
 import threading
 
@@ -32,6 +33,7 @@ class RpcConnection(object):
 class NetfsRequestHandler(socketserver.StreamRequestHandler):
     def setup(self):
         socketserver.StreamRequestHandler.setup(self)
+        self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.rpc = RpcConnection(self.rfile, self.wfile)
 
     def handle(self):
