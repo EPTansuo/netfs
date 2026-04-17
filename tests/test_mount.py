@@ -34,7 +34,7 @@ def test_mount_read_only(agent, tmp_path):
             "--host",
             "127.0.0.1",
             "--port",
-            str(agent),
+            str(agent["port"]),
             "mount",
             str(mountpoint),
         ],

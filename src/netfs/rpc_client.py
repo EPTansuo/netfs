@@ -23,34 +23,47 @@ class RpcClient(object):
         self._pending = {}
         self._pending_lock = threading.Lock()
         self._request_ids = itertools.count(1)
+        self._state_lock = threading.Lock()
 
     def connect(self):
-        if self.sock is not None:
-            return
-        self.sock = socket.create_connection((self.host, self.port), timeout=self.connect_timeout)
-        self.reader = self.sock.makefile("rb")
-        self.writer = self.sock.makefile("wb")
-        self._reader_thread = threading.Thread(target=self._reader_loop, name="netfs-rpc-reader")
-        self._reader_thread.daemon = True
-        self._reader_thread.start()
+        with self._state_lock:
+            if self.sock is not None:
+                return
+            self.sock = socket.create_connection((self.host, self.port), timeout=self.connect_timeout)
+            self.reader = self.sock.makefile("rb")
+            self.writer = self.sock.makefile("wb")
+            self._reader_thread = threading.Thread(target=self._reader_loop, name="netfs-rpc-reader")
+            self._reader_thread.daemon = True
+            self._reader_thread.start()
 
     def close(self):
         self._closed = True
-        try:
-            if self.writer is not None:
-                self.writer.close()
-        finally:
-            try:
-                if self.reader is not None:
-                    self.reader.close()
-            finally:
-                if self.sock is not None:
-                    self.sock.close()
+        self._reset_connection()
         with self._pending_lock:
             pending = list(self._pending.values())
             self._pending.clear()
         for item in pending:
             item.put(RuntimeError("rpc connection closed"))
+
+    def _reset_connection(self):
+        with self._state_lock:
+            writer = self.writer
+            reader = self.reader
+            sock = self.sock
+            self.writer = None
+            self.reader = None
+            self.sock = None
+            self._reader_thread = None
+        try:
+            if writer is not None:
+                writer.close()
+        finally:
+            try:
+                if reader is not None:
+                    reader.close()
+            finally:
+                if sock is not None:
+                    sock.close()
 
     def _reader_loop(self):
         try:
@@ -62,6 +75,7 @@ class RpcClient(object):
                 if response_queue is not None:
                     response_queue.put((header, payload))
         except Exception as exc:
+            self._reset_connection()
             with self._pending_lock:
                 pending = list(self._pending.values())
                 self._pending.clear()
