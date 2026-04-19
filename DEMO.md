@@ -226,12 +226,12 @@ if __name__ == "__main__":
 
 你刚才是因为在 host key 提示处按了 Ctrl-C，所以连接根本没建立。先做一次：
 
-ssh <user>@<server> -p 22
+ssh <user>@<server>
 
 核对指纹没问题就输入 yes。
 想自动加新主机的话，可以试：
 
-ssh -o StrictHostKeyChecking=accept-new <user>@<server> -p 22
+ssh -o StrictHostKeyChecking=accept-new <user>@<server>
 
 第一次 host key 确认本来就是 OpenSSH 的正常行为；accept-new 会自动接受“新主机 key”，但仍拒绝“已知主机 key 变化”。
 
@@ -239,12 +239,13 @@ ssh -o StrictHostKeyChecking=accept-new <user>@<server> -p 22
 
 先跑 agent：
 
+`device_agent.py` 的 `--port` 参数用于指定 agent 监听端口，默认值是 `47001`。
+
 python3 device_agent.py --root /home/your_user/EXPORT_DIR --host 127.0.0.1 --port 47001
 
 再开第二个终端，跑反向隧道：
 
 ssh -NT \
-  -p 22 \
   -o ExitOnForwardFailure=yes \
   -o ServerAliveInterval=15 \
   -o ServerAliveCountMax=3 \
@@ -255,12 +256,11 @@ ssh -NT \
 
 5) PC 上把 server 回环端口再拉回本机
 ssh -NT \
-  -p 22 \
   -o ExitOnForwardFailure=yes \
   -L 47001:127.0.0.1:47001 \
   <user>@<server>
 
-现在 PC 上的 127.0.0.1:47001 就通到 device 的 agent 了。这里之所以还要再做一次 -L，是因为 -R 在 server 侧默认只绑定 loopback；这反而更安全，不用把 agent 端口暴露给公网。只有你想让别的机器直接连 server 上那个远程端口时，才需要改 GatewayPorts。
+现在 PC 上的 `127.0.0.1:47001` 就通到 device 的 agent 了。这里之所以还要再做一次 `-L`，是因为 `-R` 在 server 侧默认只绑定 loopback；这反而更安全，不用把 agent 端口暴露给公网。只有你想让别的机器直接连 server 上那个远程端口时，才需要改 `GatewayPorts`。
 
 6) 在 PC 上测试
 python3 pc_client.py ping

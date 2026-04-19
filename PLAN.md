@@ -5,7 +5,7 @@
 在以下前提下，提供一个可长期使用的远程目录访问与远程执行方案：
 
 - `pc`: Arch Linux，可安装本地依赖，可运行 FUSE 挂载程序。
-- `server`: 公网可达跳板机，账号为 `<user>@<server>`。
+- `server`: 公网可达跳板机，账号形如 `<user>@<server>`。
 - `device`: Ubuntu 16.04，无 root 权限，无 `sshd`，无 `sshfs`，但可以主动通过 `ssh` 连接 `server`。
 
 目标能力：

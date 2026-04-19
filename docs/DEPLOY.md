@@ -4,9 +4,11 @@
 
 `device` 端只依赖 Python 标准库，不需要安装第三方包。
 
-默认 RPC 端口是 `47001`，默认 SSH 端口是 `22`。
+下面的部署命令使用占位符 `<user>@<server>`；示例按默认 SSH 端口 `22` 和默认服务端口 `47001` 书写。
 
 在 `device` 上运行：
+
+`agent/device_agent.py` 的 `--port` 参数用于指定 agent 监听端口，默认值是 `47001`。
 
 ```bash
 python3 agent/device_agent.py --root /path/to/export --host 127.0.0.1 --port 47001
@@ -16,7 +18,6 @@ python3 agent/device_agent.py --root /path/to/export --host 127.0.0.1 --port 470
 
 ```bash
 ssh -NT \
-  -p 22 \
   -o ExitOnForwardFailure=yes \
   -o ServerAliveInterval=15 \
   -o ServerAliveCountMax=3 \
@@ -38,7 +39,6 @@ conda run -n netfs-dev python -m pip install --no-build-isolation -e .
 
 ```bash
 ssh -NT \
-  -p 22 \
   -o ExitOnForwardFailure=yes \
   -L 47001:127.0.0.1:47001 \
   <user>@<server>

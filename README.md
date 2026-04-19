@@ -3,7 +3,7 @@
 `netfs` 是一个面向三机环境的远程工作目录工具：
 
 - `device`: Ubuntu 16.04，无 root、无 `sshd`、无 `sshfs`
-- `server`: 暴露在公网的跳板机，`<user>@<server>`
+- `server`: 暴露在公网的跳板机，例如 `<user>@<server>`
 - `pc`: Arch Linux，本地可安装依赖，可运行 FUSE
 
 目标是：
@@ -49,7 +49,11 @@ tests/          本机集成测试和挂载测试
 
 ## 快速开始
 
+下面的命令统一使用占位符 `<user>@<server>`；示例按默认 SSH 端口 `22` 和默认服务端口 `47001` 书写。
+
 ### 1. device 端启动 agent
+
+`agent/device_agent.py` 的 `--port` 参数用于指定 agent 监听端口，默认值是 `47001`。
 
 ```bash
 python3 agent/device_agent.py --root /path/to/export --host 127.0.0.1 --port 47001
@@ -59,7 +63,6 @@ python3 agent/device_agent.py --root /path/to/export --host 127.0.0.1 --port 470
 
 ```bash
 ssh -NT \
-  -p 22 \
   -o ExitOnForwardFailure=yes \
   -o ServerAliveInterval=15 \
   -o ServerAliveCountMax=3 \
@@ -71,7 +74,6 @@ ssh -NT \
 
 ```bash
 ssh -NT \
-  -p 22 \
   -o ExitOnForwardFailure=yes \
   -L 47001:127.0.0.1:47001 \
   <user>@<server>
